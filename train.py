@@ -21,7 +21,7 @@ import argparse
 # from einops import rearrange
 from pytorch_lightning import Trainer, seed_everything
 
-from models.lightning_unet import UNetSEVIRPLModule
+from models.lightning import SEVIRPLModule
 from sevir.config import cfg
 # from utils.optim import SequentialLR, warmup_lambda
 # from utils.utils import get_parameter_names
@@ -35,9 +35,10 @@ from utils.checkpoint import pl_ckpt_to_pytorch_state_dict, s3_download_pretrain
 pretrained_checkpoints_dir = cfg.pretrained_checkpoints_dir
 pytorch_state_dict_name = "_sevir.pt"
 
+
 def get_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', choices=['unet', 'gan', 'earthformer'], type=str)
+    parser.add_argument('--model', choices=['unet', 'earthformer'], default='unet', type=str)
     parser.add_argument('--save', default='tmp_sevir', type=str)
     parser.add_argument('--gpus', default=1, type=int)
     parser.add_argument('--cfg', default=None, type=str)
@@ -51,11 +52,12 @@ def get_parser():
     return parser
 
 def main():
+
     parser = get_parser()
     args = parser.parse_args()
     if args.pretrained:
-        args.cfg = os.path.abspath(os.path.join(os.path.dirname(__file__), "earthformer_sevir_v1.yaml"))
-    print(args.cfg)
+        args.cfg = os.path.abspath(os.path.join(os.path.dirname(__file__), "config", "cfg_{}.yaml".format(args.model)))
+
     if args.cfg is not None:
         oc_from_file = OmegaConf.load(open(args.cfg, "r"))
         dataset_oc = OmegaConf.to_object(oc_from_file.dataset)
@@ -64,25 +66,25 @@ def main():
         max_epochs = oc_from_file.optim.max_epochs
         seed = oc_from_file.optim.seed
     else:
-        dataset_oc = OmegaConf.to_object(UNetSEVIRPLModule.get_dataset_config())
+        dataset_oc = OmegaConf.to_object(SEVIRPLModule.get_dataset_config())
         micro_batch_size = 1
         total_batch_size = int(micro_batch_size * args.gpus)
         max_epochs = None
         seed = 0
     seed_everything(seed, workers=True)
-    dm = UNetSEVIRPLModule.get_sevir_datamodule(
+    dm = SEVIRPLModule.get_sevir_datamodule(
         dataset_oc=dataset_oc,
         micro_batch_size=micro_batch_size,
         num_workers=8,)
     dm.prepare_data()
     dm.setup()
     accumulate_grad_batches = total_batch_size // (micro_batch_size * args.gpus)
-    total_num_steps = UNetSEVIRPLModule.get_total_num_steps(
+    total_num_steps = SEVIRPLModule.get_total_num_steps(
         epoch=max_epochs,
         num_samples=dm.num_train_samples,
         total_batch_size=total_batch_size,
     )
-    pl_module = UNetSEVIRPLModule(
+    pl_module = SEVIRPLModule(
         total_num_steps=total_num_steps,
         save_dir=args.save,
         oc_file=args.cfg)
@@ -90,7 +92,7 @@ def main():
         devices=args.gpus,
         accumulate_grad_batches=accumulate_grad_batches,
     )
-    trainer = Trainer(**trainer_kwargs)
+    trainer = Trainer(**trainer_kwargs, detect_anomaly=True)
     if args.pretrained:
         pretrained_ckpt_name = pytorch_state_dict_name
         if not os.path.exists(os.path.join(pretrained_checkpoints_dir, pretrained_ckpt_name)):

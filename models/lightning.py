@@ -6,10 +6,11 @@ import inspect
 import pickle
 import numpy as np
 import torch
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import functional as F
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR
 import torchmetrics
+from torchmetrics import Metric
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, DeviceStatsMonitor, Callback
@@ -18,31 +19,83 @@ from omegaconf import OmegaConf
 import os
 # import argparse
 # from einops import rearrange
-# from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning import Trainer, seed_everything
 # from earthformer.config import cfg
 from utils.optim import SequentialLR, warmup_lambda
 from utils.utils import get_parameter_names
 # from utils.checkpoint import pl_ckpt_to_pytorch_state_dict, s3_download_pretrained_ckpt
 from sevir.layout import layout_to_in_out_slice
-from utils.visualization.nbody import save_example_vis_results
+from utils.visualization.sevir_vis_seq import save_example_vis_results
 from utils.metrics import SEVIRSkillScore
 
 from .unet import UNet
+from .gan import Generator, Discriminator
+from .cuboid_transformer import CuboidTransformerModel
 from sevir.torch_wrap import SEVIRLightningDataModule
-from torch.nn.parallel import DistributedDataParallel as DDP
 
 _curr_dir = os.path.realpath(os.path.dirname(os.path.realpath(__file__)))
 exps_dir = os.path.join(_curr_dir, "experiments")
 # pretrained_checkpoints_dir = cfg.pretrained_checkpoints_dir
-pytorch_state_dict_name = "earthformer_sevir.pt"
+# pytorch_state_dict_name = "earthformer_sevir.pt"
 
-class UNetSEVIRPLModule(pl.LightningModule):
+torch.autograd.set_detect_anomaly(True)
+
+
+def KL_NIG(mu1, v1, a1, b1, mu2, v2, a2, b2):
+    KL = 0.5*(a1-1)/b1 * (v2*torch.square(mu2-mu1))  \
+        + 0.5*v2/v1  \
+        - 0.5*torch.log(torch.abs(v2)/torch.abs(v1))  \
+        - 0.5 + a2*torch.log(b1/b2)  \
+        - (torch.lgamma(a1) - torch.lgamma(a2))  \
+        + (a1 - a2)*torch.digamma(a1)  \
+        - (b1 - b2)*a1/b1
+    return KL
+
+def KLDiv(out_seq, gamma, v, alpha, beta, omega=0.01, kl=False):
+    
+    error = (out_seq - gamma).abs()
+    
+    if kl:
+        loss = KL_NIG(gamma, vv, alpha, beta, gamma, omega, 1+omega, beta)
+    else:
+        loss = 2*v+alpha
+    
+    return (loss*error).mean()
+
+def KLL_NIG(y, output):
+    gamma, v, alpha, beta = torch.split(output, 1, -1)
+    two_beta_lambda = 2 * beta * (1 + v)
+    t1 = 0.5 * (torch.pi / v).log()
+    t2 = alpha * two_beta_lambda.log()
+    t3 = (alpha + 0.5) * (v * (y - gamma) ** 2 + two_beta_lambda).log()
+    t4 = alpha.lgamma()
+    t5 = (alpha + 0.5).lgamma()
+    nll = t1 - t2 + t3 + t4 - t5
+    return nll.mean()
+
+
+class AverageLoss(Metric):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.add_state("loss_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, loss: Tensor) -> None:
+        
+        self.loss_sum += loss
+        self.total += 1
+
+    def compute(self) -> Tensor:
+        return self.loss_sum / self.total
+    
+class SEVIRPLModule(pl.LightningModule):
 
     def __init__(self,
                  total_num_steps: int,
                  oc_file: str = None,
                  save_dir: str = None):
-        super(UNetSEVIRPLModule, self).__init__()
+        super(SEVIRPLModule, self).__init__()
+
         self._max_train_iter = total_num_steps
         if oc_file is not None:
             oc_from_file = OmegaConf.load(open(oc_file, "r"))
@@ -63,73 +116,98 @@ class UNetSEVIRPLModule(pl.LightningModule):
             dec_cross_attn_patterns = [model_cfg["cross_pattern"]] * num_blocks
         else:
             dec_cross_attn_patterns = OmegaConf.to_container(model_cfg["cross_pattern"])
-
-        self.torch_nn_module = CuboidTransformerModel(
-            input_shape=model_cfg["input_shape"],
-            target_shape=model_cfg["target_shape"],
-            base_units=model_cfg["base_units"],
-            block_units=model_cfg["block_units"],
-            scale_alpha=model_cfg["scale_alpha"],
-            enc_depth=model_cfg["enc_depth"],
-            dec_depth=model_cfg["dec_depth"],
-            enc_use_inter_ffn=model_cfg["enc_use_inter_ffn"],
-            dec_use_inter_ffn=model_cfg["dec_use_inter_ffn"],
-            dec_hierarchical_pos_embed=model_cfg["dec_hierarchical_pos_embed"],
-            downsample=model_cfg["downsample"],
-            downsample_type=model_cfg["downsample_type"],
-            enc_attn_patterns=enc_attn_patterns,
-            dec_self_attn_patterns=dec_self_attn_patterns,
-            dec_cross_attn_patterns=dec_cross_attn_patterns,
-            dec_cross_last_n_frames=model_cfg["dec_cross_last_n_frames"],
-            dec_use_first_self_attn=model_cfg["dec_use_first_self_attn"],
-            num_heads=model_cfg["num_heads"],
-            attn_drop=model_cfg["attn_drop"],
-            proj_drop=model_cfg["proj_drop"],
-            ffn_drop=model_cfg["ffn_drop"],
-            upsample_type=model_cfg["upsample_type"],
-            ffn_activation=model_cfg["ffn_activation"],
-            gated_ffn=model_cfg["gated_ffn"],
-            norm_layer=model_cfg["norm_layer"],
-            # global vectors
-            num_global_vectors=model_cfg["num_global_vectors"],
-            use_dec_self_global=model_cfg["use_dec_self_global"],
-            dec_self_update_global=model_cfg["dec_self_update_global"],
-            use_dec_cross_global=model_cfg["use_dec_cross_global"],
-            use_global_vector_ffn=model_cfg["use_global_vector_ffn"],
-            use_global_self_attn=model_cfg["use_global_self_attn"],
-            separate_global_qkv=model_cfg["separate_global_qkv"],
-            global_dim_ratio=model_cfg["global_dim_ratio"],
-            # initial_downsample
-            initial_downsample_type=model_cfg["initial_downsample_type"],
-            initial_downsample_activation=model_cfg["initial_downsample_activation"],
-            # initial_downsample_type=="stack_conv"
-            initial_downsample_stack_conv_num_layers=model_cfg["initial_downsample_stack_conv_num_layers"],
-            initial_downsample_stack_conv_dim_list=model_cfg["initial_downsample_stack_conv_dim_list"],
-            initial_downsample_stack_conv_downscale_list=model_cfg["initial_downsample_stack_conv_downscale_list"],
-            initial_downsample_stack_conv_num_conv_list=model_cfg["initial_downsample_stack_conv_num_conv_list"],
-            # misc
-            padding_type=model_cfg["padding_type"],
-            z_init_method=model_cfg["z_init_method"],
-            checkpoint_level=model_cfg["checkpoint_level"],
-            pos_embed_type=model_cfg["pos_embed_type"],
-            use_relative_pos=model_cfg["use_relative_pos"],
-            self_attn_use_final_proj=model_cfg["self_attn_use_final_proj"],
-            # initialization
-            attn_linear_init_mode=model_cfg["attn_linear_init_mode"],
-            ffn_linear_init_mode=model_cfg["ffn_linear_init_mode"],
-            conv_init_mode=model_cfg["conv_init_mode"],
-            down_up_linear_init_mode=model_cfg["down_up_linear_init_mode"],
-            norm_init_mode=model_cfg["norm_init_mode"],
-        )
-
-        self.total_num_steps = total_num_steps
-        if oc_file is not None:
-            oc_from_file = OmegaConf.load(open(oc_file, "r"))
+            
+        #loss fn
+        self.loss_cfg = OmegaConf.to_object(oc.loss)
+        if self.loss_cfg["loss_fn"] == 'mse':
+            self.loss_fn = F.mse_loss
+        elif self.loss_cfg["loss_fn"] == 'nll':
+            self.loss_fn = KLL_NIG
+        self.edl = self.loss_cfg["edl"]
+        self.edl_act = self.loss_cfg["edl_act"]
+        self.kldiv = KLDiv
+        self.lambda_increasing = self.loss_cfg["lambda_increasing"]
+        self.coeff = lambda x: self.loss_cfg["slope"] * x if self.loss_cfg["slope"] * x < self.loss_cfg["lambda"] else self.loss_cfg["lambda"]
+        
+        if model_cfg["name"] == "earthformer":
+            self.torch_nn_module = CuboidTransformerModel(
+                input_shape=model_cfg["input_shape"],
+                target_shape=model_cfg["target_shape"],
+                base_units=model_cfg["base_units"],
+                block_units=model_cfg["block_units"],
+                scale_alpha=model_cfg["scale_alpha"],
+                enc_depth=model_cfg["enc_depth"],
+                dec_depth=model_cfg["dec_depth"],
+                enc_use_inter_ffn=model_cfg["enc_use_inter_ffn"],
+                dec_use_inter_ffn=model_cfg["dec_use_inter_ffn"],
+                dec_hierarchical_pos_embed=model_cfg["dec_hierarchical_pos_embed"],
+                downsample=model_cfg["downsample"],
+                downsample_type=model_cfg["downsample_type"],
+                enc_attn_patterns=enc_attn_patterns,
+                dec_self_attn_patterns=dec_self_attn_patterns,
+                dec_cross_attn_patterns=dec_cross_attn_patterns,
+                dec_cross_last_n_frames=model_cfg["dec_cross_last_n_frames"],
+                dec_use_first_self_attn=model_cfg["dec_use_first_self_attn"],
+                num_heads=model_cfg["num_heads"],
+                attn_drop=model_cfg["attn_drop"],
+                proj_drop=model_cfg["proj_drop"],
+                ffn_drop=model_cfg["ffn_drop"],
+                upsample_type=model_cfg["upsample_type"],
+                ffn_activation=model_cfg["ffn_activation"],
+                gated_ffn=model_cfg["gated_ffn"],
+                norm_layer=model_cfg["norm_layer"],
+                # global vectors
+                num_global_vectors=model_cfg["num_global_vectors"],
+                use_dec_self_global=model_cfg["use_dec_self_global"],
+                dec_self_update_global=model_cfg["dec_self_update_global"],
+                use_dec_cross_global=model_cfg["use_dec_cross_global"],
+                use_global_vector_ffn=model_cfg["use_global_vector_ffn"],
+                use_global_self_attn=model_cfg["use_global_self_attn"],
+                separate_global_qkv=model_cfg["separate_global_qkv"],
+                global_dim_ratio=model_cfg["global_dim_ratio"],
+                # initial_downsample
+                initial_downsample_type=model_cfg["initial_downsample_type"],
+                initial_downsample_activation=model_cfg["initial_downsample_activation"],
+                # initial_downsample_type=="stack_conv"
+                initial_downsample_stack_conv_num_layers=model_cfg["initial_downsample_stack_conv_num_layers"],
+                initial_downsample_stack_conv_dim_list=model_cfg["initial_downsample_stack_conv_dim_list"],
+                initial_downsample_stack_conv_downscale_list=model_cfg["initial_downsample_stack_conv_downscale_list"],
+                initial_downsample_stack_conv_num_conv_list=model_cfg["initial_downsample_stack_conv_num_conv_list"],
+                # misc
+                padding_type=model_cfg["padding_type"],
+                z_init_method=model_cfg["z_init_method"],
+                checkpoint_level=model_cfg["checkpoint_level"],
+                pos_embed_type=model_cfg["pos_embed_type"],
+                use_relative_pos=model_cfg["use_relative_pos"],
+                self_attn_use_final_proj=model_cfg["self_attn_use_final_proj"],
+                # initialization
+                attn_linear_init_mode=model_cfg["attn_linear_init_mode"],
+                ffn_linear_init_mode=model_cfg["ffn_linear_init_mode"],
+                conv_init_mode=model_cfg["conv_init_mode"],
+                down_up_linear_init_mode=model_cfg["down_up_linear_init_mode"],
+                norm_init_mode=model_cfg["norm_init_mode"],
+                edl = self.edl,
+                edl_act = self.edl_act,
+            )
+        elif model_cfg["name"] == "unet":
+            self.torch_nn_module = UNet(
+                input_shape=model_cfg["input_shape"],
+                target_shape=model_cfg["target_shape"],
+                enc_nodes=model_cfg["enc_nodes"],
+                center=model_cfg["center"],
+                dec_nodes=model_cfg["dec_nodes"],
+                activation=model_cfg["activation"],
+                edl = self.edl,
+                edl_act = self.edl_act,
+            )
         else:
-            oc_from_file = None
-        oc = self.get_base_config(oc_from_file=oc_from_file)
+            raise NotImplementedError
+        
+        self.model_name = model_cfg["name"]
+        self.total_num_steps = total_num_steps
         self.save_hyperparameters(oc)
         self.oc = oc
+
         # layout
         self.in_len = oc.layout.in_len
         self.out_len = oc.layout.out_len
@@ -154,12 +232,16 @@ class UNetSEVIRPLModule(pl.LightningModule):
         self.eval_example_only = oc.vis.eval_example_only
 
         self.configure_save(cfg_file_path=oc_file)
+        
         # evaluation
         self.metrics_list = oc.dataset.metrics_list
         self.threshold_list = oc.dataset.threshold_list
         self.metrics_mode = oc.dataset.metrics_mode
         self.valid_mse = torchmetrics.MeanSquaredError()
         self.valid_mae = torchmetrics.MeanAbsoluteError()
+        self.valid_loss = AverageLoss()
+        self.valid_kldiv = AverageLoss()
+        self.valid_total_loss = AverageLoss()
         self.valid_score = SEVIRSkillScore(
             mode=self.metrics_mode,
             seq_len=self.out_len,
@@ -169,6 +251,9 @@ class UNetSEVIRPLModule(pl.LightningModule):
             eps=1e-4,)
         self.test_mse = torchmetrics.MeanSquaredError()
         self.test_mae = torchmetrics.MeanAbsoluteError()
+        self.test_loss = AverageLoss()
+        self.test_kldiv = AverageLoss()
+        self.test_total_loss = AverageLoss()
         self.test_score = SEVIRSkillScore(
             mode=self.metrics_mode,
             seq_len=self.out_len,
@@ -235,6 +320,7 @@ class UNetSEVIRPLModule(pl.LightningModule):
         in_len = dataset_oc.in_len
         out_len = dataset_oc.out_len
         data_channels = 1
+        cfg.name = "earthformer"
         cfg.input_shape = (in_len, height, width, data_channels)
         cfg.target_shape = (out_len, height, width, data_channels)
 
@@ -336,7 +422,7 @@ class UNetSEVIRPLModule(pl.LightningModule):
         oc.logging_prefix = "SEVIR"
         oc.monitor_lr = True
         oc.monitor_device = False
-        oc.track_grad_norm = -1
+        # oc.track_grad_norm = -1
         oc.use_wandb = True
         return oc
 
@@ -375,6 +461,10 @@ class UNetSEVIRPLModule(pl.LightningModule):
 
         if self.oc.optim.method == 'adamw':
             optimizer = torch.optim.AdamW(params=optimizer_grouped_parameters,
+                                          lr=self.oc.optim.lr,
+                                          weight_decay=self.oc.optim.wd)
+        elif self.oc.optim.method == 'adam':
+            optimizer = torch.optim.Adam(params=optimizer_grouped_parameters,
                                           lr=self.oc.optim.lr,
                                           weight_decay=self.oc.optim.wd)
         else:
@@ -433,7 +523,7 @@ class UNetSEVIRPLModule(pl.LightningModule):
         csv_logger = pl_loggers.CSVLogger(save_dir=self.save_dir)
         logger += [tb_logger, csv_logger]
         if self.oc.logging.use_wandb:
-            wandb_logger = pl_loggers.WandbLogger(project=self.oc.logging.logging_prefix,
+            wandb_logger = pl_loggers.WandbLogger(project="SEVIR_EDL", group=self.oc.logging.logging_prefix,
                                                   save_dir=self.save_dir)
             logger += [wandb_logger, ]
 
@@ -444,13 +534,13 @@ class UNetSEVIRPLModule(pl.LightningModule):
             # log
             logger=logger,
             log_every_n_steps=log_every_n_steps,
-            track_grad_norm=self.oc.logging.track_grad_norm,
+            # track_grad_norm=self.oc.logging.track_grad_norm,
             # save
             default_root_dir=self.save_dir,
             # ddp
             accelerator="gpu",
-            # strategy="ddp",
-            strategy=ApexDDPStrategy(find_unused_parameters=False, delay_allreduce=True),
+            # Distributed data parallel
+            strategy="ddp_find_unused_parameters_true",
             # optimization
             max_epochs=self.oc.optim.max_epochs,
             check_val_every_n_epoch=self.oc.trainer.check_val_every_n_epoch,
@@ -524,17 +614,31 @@ class UNetSEVIRPLModule(pl.LightningModule):
             self._in_slice = in_slice
             self._out_slice = out_slice
         return self._out_slice
-
+    
+    def loss(self, output, out_seq):
+        edl_params = []
+        if self.edl:
+            gamma, v, alpha, beta = torch.split(output, 1, -1)
+            edl_params = [v, alpha, beta]
+        else:
+            gamma = output
+        loss = self.loss_fn(out_seq, output)
+        if self.edl:
+            kldiv = self.kldiv(out_seq, gamma, v, alpha, beta, omega=self.loss_cfg["omega"], kl=self.loss_cfg["kl"])
+        else:
+            kldiv = 0
+        return gamma, loss, kldiv, edl_params
+    
     def forward(self, in_seq, out_seq):
         output = self.torch_nn_module(in_seq)
-        loss = F.mse_loss(output, out_seq)
-        return output, loss
+        output, loss, kldiv, edl_params = self.loss(output, out_seq)
+        return output, loss, kldiv, edl_params
 
     def training_step(self, batch, batch_idx):
         data_seq = batch['vil'].contiguous()
         x = data_seq[self.in_slice]
         y = data_seq[self.out_slice]
-        y_hat, loss = self(x, y)
+        y_hat, loss, kldiv, edl_params = self(x, y)
         micro_batch_size = x.shape[self.layout.find("N")]
         data_idx = int(batch_idx * micro_batch_size)
         self.save_vis_step_end(
@@ -542,11 +646,16 @@ class UNetSEVIRPLModule(pl.LightningModule):
             in_seq=x,
             target_seq=y,
             pred_seq=y_hat,
+            edl_params=edl_params,
             mode="train"
         )
         self.log('train_loss', loss,
-                 on_step=True, on_epoch=False)
-        return loss
+                 on_step=True, on_epoch=False, sync_dist=True)
+        self.log('kldiv_loss', kldiv,
+                 on_step=True, on_epoch=False, sync_dist=True)
+        total_loss = loss + self.coeff(self.current_epoch) * kldiv
+        self.log('total_train_loss', total_loss, on_step=True, on_epoch=False, sync_dist=True)
+        return total_loss
 
     def validation_step(self, batch, batch_idx):
         data_seq = batch['vil'].contiguous()
@@ -555,37 +664,72 @@ class UNetSEVIRPLModule(pl.LightningModule):
         micro_batch_size = x.shape[self.layout.find("N")]
         data_idx = int(batch_idx * micro_batch_size)
         if not self.eval_example_only or data_idx in self.val_example_data_idx_list:
-            y_hat, _ = self(x, y)
+            y_hat, loss, kldiv, edl_params = self(x, y)
             self.save_vis_step_end(
                 data_idx=data_idx,
                 in_seq=x,
                 target_seq=y,
                 pred_seq=y_hat,
+                edl_params=edl_params,
                 mode="val"
             )
-            if self.precision == 16:
+            if self.oc.trainer.precision == 16:
                 y_hat = y_hat.float()
+            if not y.is_contiguous():
+                y = y.contiguous()
+            if not y_hat.is_contiguous():
+                y_hat = y_hat.contiguous()
             step_mse = self.valid_mse(y_hat, y)
             step_mae = self.valid_mae(y_hat, y)
+            self.valid_loss.update(loss)
+            self.valid_kldiv.update(kldiv)
+            total_loss = loss + self.coeff(self.current_epoch) * kldiv
+            self.valid_total_loss.update(total_loss)
+                    
             self.valid_score.update(y_hat, y)
             self.log('valid_frame_mse_step', step_mse,
-                     prog_bar=True, on_step=True, on_epoch=False)
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
             self.log('valid_frame_mae_step', step_mae,
-                     prog_bar=True, on_step=True, on_epoch=False)
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            
+            self.log('valid_loss_step', loss,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            self.log('valid_kldiv_step', kldiv,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            self.log('valid_total_loss_step', total_loss,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
         return None
 
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
         valid_mse = self.valid_mse.compute()
         valid_mae = self.valid_mae.compute()
+        
+        valid_loss = self.valid_loss.compute()
+        valid_kldiv = self.valid_kldiv.compute()
+        valid_total_loss = self.valid_total_loss.compute()
+        
         self.log('valid_frame_mse_epoch', valid_mse,
-                 prog_bar=True, on_step=False, on_epoch=True)
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.log('valid_frame_mae_epoch', valid_mae,
-                 prog_bar=True, on_step=False, on_epoch=True)
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        
+        self.log('valid_loss_mse-nll_epoch', valid_loss,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('valid_kldiv_epoch', valid_kldiv,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('valid_total_loss_epoch', valid_total_loss,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        
+        if self.edl:
+            self.log('KL_coeff', self.coeff(self.current_epoch), prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.valid_mse.reset()
         self.valid_mae.reset()
+        self.valid_loss.reset()
+        self.valid_kldiv.reset()
+        self.valid_total_loss.reset()
         valid_score = self.valid_score.compute()
         self.log("valid_loss_epoch", -valid_score["avg"]["csi"],
-                 prog_bar=True, on_step=False, on_epoch=True)
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.log_score_epoch_end(score_dict=valid_score, mode="val")
         self.valid_score.reset()
         self.save_score_epoch_end(score_dict=valid_score,
@@ -600,34 +744,68 @@ class UNetSEVIRPLModule(pl.LightningModule):
         micro_batch_size = x.shape[self.layout.find("N")]
         data_idx = int(batch_idx * micro_batch_size)
         if not self.eval_example_only or data_idx in self.test_example_data_idx_list:
-            y_hat, _ = self(x, y)
+            y_hat, loss, kldiv, edl_params = self(x, y)
             self.save_vis_step_end(
                 data_idx=data_idx,
                 in_seq=x,
                 target_seq=y,
                 pred_seq=y_hat,
+                edl_params=edl_params,
                 mode="test"
             )
-            if self.precision == 16:
+            if self.oc.trainer.precision == 16:
                 y_hat = y_hat.float()
+            if not y.is_contiguous():
+                y = y.contiguous()
+            if not y_hat.is_contiguous():
+                y_hat = y_hat.contiguous()
             step_mse = self.test_mse(y_hat, y)
             step_mae = self.test_mae(y_hat, y)
+            self.test_loss.update(loss)
+            self.test_kldiv.update(kldiv)
+            total_loss = loss + self.coeff(self.current_epoch) * kldiv
+            self.test_total_loss.update(total_loss)
             self.test_score.update(y_hat, y)
+            
             self.log('test_frame_mse_step', step_mse,
-                     prog_bar=True, on_step=True, on_epoch=False)
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
             self.log('test_frame_mae_step', step_mae,
-                     prog_bar=True, on_step=True, on_epoch=False)
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            
+            self.log('test_loss_step', loss,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            self.log('test_kldiv_step', kldiv,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
+            self.log('test_total_loss_step', total_loss,
+                     prog_bar=True, on_step=True, on_epoch=False, sync_dist=True)
         return None
 
-    def test_epoch_end(self, outputs):
+    def on_test_epoch_end(self):
         test_mse = self.test_mse.compute()
         test_mae = self.test_mae.compute()
+        
+        test_loss = self.test_loss.compute()
+        test_kldiv = self.test_kldiv.compute()
+        test_total_loss = self.test_total_loss.compute()
+        
         self.log('test_frame_mse_epoch', test_mse,
-                 prog_bar=True, on_step=False, on_epoch=True)
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_frame_mae_epoch', test_mae,
-                 prog_bar=True, on_step=False, on_epoch=True)
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        
+        self.log('test_loss_mse/nll_epoch', test_loss,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_kldiv_epoch', test_kldiv,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        self.log('test_total_loss_epoch', test_total_loss,
+                 prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        if self.edl:
+            self.log('KL_coeff', self.coeff(self.current_epoch), prog_bar=True, on_step=False, on_epoch=True)
         self.test_mse.reset()
         self.test_mae.reset()
+        self.test_loss.reset()
+        self.test_kldiv.reset()
+        self.test_total_loss.reset()
         test_score = self.test_score.compute()
         self.log_score_epoch_end(score_dict=test_score, mode="test")
         self.test_score.reset()
@@ -646,11 +824,11 @@ class UNetSEVIRPLModule(pl.LightningModule):
         for metrics in self.metrics_list:
             for thresh in self.threshold_list:
                 score_mean = np.mean(score_dict[thresh][metrics]).item()
-                self.log(f"{log_mode_prefix}_{metrics}_{thresh}_epoch", score_mean)
+                self.log(f"{log_mode_prefix}_{metrics}_{thresh}_epoch", score_mean, sync_dist=True)
             score_avg_mean = score_dict.get("avg", None)
             if score_avg_mean is not None:
                 score_avg_mean = np.mean(score_avg_mean[metrics]).item()
-                self.log(f"{log_mode_prefix}_{metrics}_avg_epoch", score_avg_mean)
+                self.log(f"{log_mode_prefix}_{metrics}_avg_epoch", score_avg_mean, sync_dist=True)
 
     def save_score_epoch_end(self,
                              score_dict: Dict,
@@ -673,6 +851,7 @@ class UNetSEVIRPLModule(pl.LightningModule):
             in_seq: torch.Tensor,
             target_seq: torch.Tensor,
             pred_seq: torch.Tensor,
+            edl_params: torch.Tensor,
             mode: str = "train"):
         r"""
         Parameters
@@ -689,6 +868,9 @@ class UNetSEVIRPLModule(pl.LightningModule):
                 example_data_idx_list = self.test_example_data_idx_list
             else:
                 raise ValueError(f"Wrong mode {mode}! Must be in ['train', 'val', 'test'].")
+            if self.edl:
+                for i in range(3):
+                    edl_params[i] = edl_params[i].detach().float().cpu().numpy()
             if data_idx in example_data_idx_list:
                 save_example_vis_results(
                     save_dir=self.example_save_dir,
@@ -699,4 +881,6 @@ class UNetSEVIRPLModule(pl.LightningModule):
                     layout=self.layout,
                     plot_stride=self.oc.vis.plot_stride,
                     label=self.oc.logging.logging_prefix,
-                    interval_real_time=self.oc.dataset.interval_real_time)
+                    interval_real_time=self.oc.dataset.interval_real_time,
+                    edl=self.edl,
+                    edl_params=edl_params)

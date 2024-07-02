@@ -2,9 +2,14 @@ import datetime
 
 import numpy as np
 from matplotlib import pyplot as plt
+import os, sys
 
+module_path = os.path.abspath(os.path.join('..'))
+if module_path not in sys.path:
+    sys.path.append(module_path)
+    
 from sevir.dataloader import SEVIR_CATALOG, SEVIR_DATA_DIR, SEVIR_RAW_SEQ_LEN, \
-    SEVIR_LR_CATALOG, SEVIR_LR_DATA_DIR, SEVIR_LR_RAW_SEQ_LEN, SEVIRDataLoader
+    SEVIRDataLoader
 
 
 def report_SEVIR_statistics(
@@ -36,10 +41,6 @@ def report_SEVIR_statistics(
         catalog_path = SEVIR_CATALOG
         data_dir = SEVIR_DATA_DIR
         raw_seq_len = SEVIR_RAW_SEQ_LEN
-    elif dataset == "sevir_lr":
-        catalog_path = SEVIR_LR_CATALOG
-        data_dir = SEVIR_LR_DATA_DIR
-        raw_seq_len = SEVIR_LR_RAW_SEQ_LEN
     else:
         raise ValueError(f"Invalid dataset: {dataset}")
 

@@ -2,47 +2,68 @@
 # https://colab.research.google.com/github/MarkDaoust/models/blob/segmentation_blogpost/samples/outreach/blogs/segmentation_blogpost/image_segmentation.ipynb
 import torch
 import torch.nn as nn
-from .utils import EncoderBlock, ConvBlock, DecoderBlock
+from .utils import EncoderBlock, ConvBlock, DecoderBlock, get_activation
 from torchinfo import summary
 
 class UNet(nn.Module):
-    def __init__(self, inp=13, oup=12, activation='relu'):
+    def __init__(self, input_shape=[13, 384, 384, 1], target_shape=[12, 384, 384, 1], enc_nodes= [32, 64, 128, 256], center=1024, dec_nodes=[256, 128, 64, 32], activation='relu', edl=False, edl_act = 'relu'):
         super().__init__()
         
-        self.enc0 = EncoderBlock(inp, 32, activation)
-        self.enc1 = EncoderBlock(32, 64, activation)
-        self.enc2 = EncoderBlock(64, 128, activation)
-        self.enc3 = EncoderBlock(128, 256, activation)
-        self.center = ConvBlock(256, 1024, activation)
-        self.dec3 = DecoderBlock(1024, 256, activation, concat=256)
-        self.dec2 = DecoderBlock(256, 128, activation, concat=128)
-        self.dec1 = DecoderBlock(128, 64, activation, concat=64)
-        self.dec0 = DecoderBlock(64, 32, activation, concat=32)
-        self.conv = nn.Conv2d(32, oup, 1, padding='same')
+        assert len(input_shape) == len(target_shape)
+        assert len(enc_nodes) == len(dec_nodes)
+        self.edl = edl
+        self.target_shape = target_shape.copy()
+        if self.edl:
+            target_shape[0] *= 4
+            
         
+        self.enc_nodes = enc_nodes
+        self.dec_nodes = dec_nodes
+        self.enc_nodes.insert(0, input_shape[0])
+        self.dec_nodes.insert(0, center)
+                
+        self.encs = nn.ModuleList([EncoderBlock(self.enc_nodes[i], self.enc_nodes[i + 1], activation=activation) for i in range(len(self.enc_nodes) - 1)])        
+                             
+        self.center = ConvBlock(enc_nodes[-1], center, activation)
+        
+        self.decs = nn.ModuleList([DecoderBlock(self.dec_nodes[i], self.dec_nodes[i + 1], activation=activation, concat=self.dec_nodes[i+1]) for i in range(len(self.dec_nodes) - 1)]) 
+                             
+        self.conv = nn.Conv2d(self.dec_nodes[-1], target_shape[0], 1, padding='same')
+        if self.edl:
+            self.edl_act = get_activation(edl_act)
+            
     def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        enc_pool0, enc0 = self.enc0(x)
-        enc_pool1, enc1 = self.enc1(enc_pool0)
-        enc_pool2, enc2 = self.enc2(enc_pool1)
-        enc_pool3, enc3 = self.enc3(enc_pool2)
+        x = x.squeeze(-1)
+        pool = x
+        encs = []
+        for i, enc_n in enumerate(self.encs):
+            pool, enc_i = enc_n(pool)
+            encs.insert(0, enc_i)
         
-        cen = self.center(enc_pool3)
-        out = self.dec3(cen, enc3)
-        out = self.dec2(out, enc2)
-        out = self.dec1(out, enc1)
-        out = self.dec0(out, enc0)
+        out = self.center(pool)
+        
+        for i, dec_n in enumerate(self.decs):
+            out = dec_n(out, encs[i])
         
         out = self.conv(out)
         
-        out = out.permute(0, 2, 3, 1)
+        if self.edl:
+            out = out.reshape(out.size(0), self.target_shape[0], self.target_shape[1], self.target_shape[2], 4)
+            mu, logv, logalpha, logbeta = torch.split(out, 1, -1)
+            v = self.edl_act(logv)
+            alpha = self.edl_act(logalpha) + 1
+            beta = self.edl_act(logbeta)
+            out = torch.cat((mu, v, alpha, beta), dim=-1)
+        else:
+            out = out.unsqueeze(-1)
+        
         return out
     
     
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = UNet(13, 12).to(device)
-    x = torch.rand(2, 384, 384, 13).to(device)
+    model = UNet(edl=True).to(device)
+    x = torch.rand(2, 13, 384, 384, 1).to(device)
     with torch.no_grad():
         y = model(x)
         print(y)

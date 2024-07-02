@@ -174,21 +174,29 @@ class SEVIRLightningDataModule(LightningDataModule):
         self.verbose = verbose
         self.num_workers = num_workers
         if dataset_name == "sevir":
-            sevir_root_dir = os.path.join(cfg.datasets_dir, "sevir")
+            sevir_root_dir = cfg.datasets_dir
             catalog_path = os.path.join(sevir_root_dir, "CATALOG.csv")
             raw_data_dir = os.path.join(sevir_root_dir, "data")
             raw_seq_len = 49
             interval_real_time = 5
             img_height = 384
             img_width = 384
-        elif dataset_name == "sevir_lr":
-            sevir_root_dir = os.path.join(cfg.datasets_dir, "sevir_lr")
+        elif dataset_name == "storm":
+            sevir_root_dir = cfg.datasets_dir
             catalog_path = os.path.join(sevir_root_dir, "CATALOG.csv")
-            raw_data_dir = os.path.join(sevir_root_dir, "data")
-            raw_seq_len = 25
-            interval_real_time = 10
-            img_height = 128
-            img_width = 128
+            raw_data_dir = os.path.join(sevir_root_dir, "storm")
+            raw_seq_len = 49
+            interval_real_time = 5
+            img_height = 384
+            img_width = 384
+        elif dataset_name == "random":
+            sevir_root_dir = cfg.datasets_dir
+            catalog_path = os.path.join(sevir_root_dir, "CATALOG.csv")
+            raw_data_dir = os.path.join(sevir_root_dir, "random")
+            raw_seq_len = 49
+            interval_real_time = 5
+            img_height = 384
+            img_width = 384
         else:
             raise ValueError(f"Wrong dataset name {dataset_name}. Must be 'sevir' or 'sevir_lr'.")
         self.dataset_name = dataset_name

@@ -12,6 +12,8 @@ def get_activation(name):
         return nn.LeakyReLU(0.2)
     elif name == "elu":
         return nn.ELU()
+    elif name == "softplus":
+        return nn.Softplus()
     else:
         raise ValueError(f"Unknown activation function: {name}")
         

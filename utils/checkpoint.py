@@ -2,7 +2,7 @@ import os
 import warnings
 from typing import Callable, Dict, Optional, Union, List
 import torch
-from pytorch_lightning.utilities.cloud_io import load as pl_load
+from lightning_fabric.utilities.cloud_io import _load as pl_load
 
 
 def average_checkpoints(checkpoint_paths: List[str] = None):

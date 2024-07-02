@@ -45,7 +45,7 @@ PREPROCESS_OFFSET_01 = {'vis': 0,
 # # default configs
 from .config import cfg
 # sevir
-SEVIR_ROOT_DIR = os.path.join(cfg.datasets_dir, "sevir")
+SEVIR_ROOT_DIR = cfg.datasets_dir
 SEVIR_CATALOG = os.path.join(SEVIR_ROOT_DIR, "CATALOG.csv")
 SEVIR_DATA_DIR = os.path.join(SEVIR_ROOT_DIR, "data")
 SEVIR_RAW_SEQ_LEN = 49

@@ -4,37 +4,41 @@ from .utils import EncoderBlock, ConvBlock, DecoderBlock, Downsampler
 from torchinfo import summary
 
 class Generator(nn.Module):
-    def __init__(self, inp=13, oup=12, activation='leaky_relu'):
+    def __init__(self, input_shape=[13, 384, 384, 1], target_shape=[12, 384, 384, 1], enc_nodes= [32, 64, 128, 256], center=1024, dec_nodes=[256, 128, 64, 32], activation='leaky_relu'):
         super().__init__()
         
-        self.enc0 = EncoderBlock(inp, 32, activation)
-        self.enc1 = EncoderBlock(32, 64, activation)
-        self.enc2 = EncoderBlock(64, 128, activation)
-        self.enc3 = EncoderBlock(128, 256, activation)
-        self.center = ConvBlock(256, 1024, activation)
-        self.dec3 = DecoderBlock(1024, 256, activation, concat=256)
-        self.dec2 = DecoderBlock(256, 128, activation, concat=128)
-        self.dec1 = DecoderBlock(128, 64, activation, concat=64)
-        self.dec0 = DecoderBlock(64, 32, activation, concat=32)
-        self.conv = nn.Conv2d(32, oup, 1, padding='same')
+        assert len(input_shape) == len(target_shape)
+        assert len(enc_nodes) == len(dec_nodes)
+        
+        self.enc_nodes = enc_nodes
+        self.dec_nodes = dec_nodes
+        self.enc_nodes.insert(0, input_shape[0])
+        self.dec_nodes.insert(0, center)
+                
+        self.encs = nn.ModuleList([EncoderBlock(self.enc_nodes[i], self.enc_nodes[i + 1], activation=activation) for i in range(len(self.enc_nodes) - 1)])        
+                             
+        self.center = ConvBlock(enc_nodes[-1], center, activation)
+        
+        self.decs = nn.ModuleList([DecoderBlock(self.dec_nodes[i], self.dec_nodes[i + 1], activation=activation, concat=self.dec_nodes[i+1]) for i in range(len(self.dec_nodes) - 1)]) 
+                             
+        self.conv = nn.Conv2d(self.dec_nodes[-1], target_shape[0], 1, padding='same')
         
     def forward(self, x):
-        x = x.permute(0, 3, 1, 2)
-        enc_pool0, enc0 = self.enc0(x)
-        enc_pool1, enc1 = self.enc1(enc_pool0)
-        enc_pool2, enc2 = self.enc2(enc_pool1)
-        enc_pool3, enc3 = self.enc3(enc_pool2)
+        x = x.squeeze(-1)
+        pool = x
+        encs = []
+        for i, enc_n in enumerate(self.encs):
+            pool, enc_i = enc_n(pool)
+            encs.insert(0, enc_i)
         
-        cen = self.center(enc_pool3)
+        out = self.center(pool)
         
-        out = self.dec3(cen, enc3)
-        out = self.dec2(out, enc2)
-        out = self.dec1(out, enc1)
-        out = self.dec0(out, enc0)
+        for i, dec_n in enumerate(self.decs):
+            out = dec_n(out, encs[i])
         
         out = self.conv(out)
+        out = out.unsqueeze(-1)
         
-        out = out.permute(0, 2, 3, 1)
         return out
 
 # discriminator and downsample code inspired from :
@@ -42,47 +46,40 @@ class Generator(nn.Module):
 # discriminator is a patchGAN - basically a convnet with B X H x W x C output
 # instead of a single true/false output
 class Discriminator(nn.Module):
-    def __init__(self, inp=13, oup=12, activation='leaky_relu'):
+    def __init__(self, input_shape=[13, 384, 384, 1], target_shape=[12, 384, 384, 1], downsample_nodes= [64, 128, 256, 512], batchnorms=[False, True, True, True], paddings=[1,1,1,0], strides=[2, 2, 2, 1, 1], activation='leaky_relu'):
         super().__init__()
         
-        self.down1 = Downsampler(inp + oup, 64, 4, 2, apply_batchnorm=False, paddings=1, activation=activation)
-        self.down2 = Downsampler(64, 128, 4, 2, paddings=1, activation=activation)
-        self.down3 = Downsampler(128, 256, 4, 2, paddings=1, activation=activation)
+        self.downsample_nodes = downsample_nodes
+        self.downsample_nodes.insert(0, input_shape[0] + target_shape[0])
         
+        self.downs = nn.ModuleList([Downsampler(self.downsample_nodes[i], self.downsample_nodes[i + 1], 4, strides[i], paddings=paddings[i], apply_batchnorm=batchnorms[i], activation=activation) for i in range(len(self.downsample_nodes) - 1)])
+                
         self.pad = nn.ZeroPad2d(1)
-        
-        self.down4 = Downsampler(256, 512, 4, 1, paddings=0, activation=activation)
-        
-        self.conv = nn.Conv2d(512, 1, 4)
+                
+        self.conv = nn.Conv2d(self.downsample_nodes[-1], strides[-1], 4)
         nn.init.normal_(self.conv.weight, 0., 0.02)
         
                 
     def forward(self, x, y):
-        x = x.permute(0, 3, 1, 2)
-        y = y.permute(0, 3, 1, 2)
-        inp = torch.cat((x, y), 1)
-
-        down1 = self.down1(inp)
-        down2 = self.down2(down1)
-        down3 = self.down3(down2)
-        pad = self.pad(down3)
-        
-        down4 = self.down4(pad)
-        new_pad = self.pad(down4)
-        
-        out = self.conv(new_pad)
-        
-        out = out.permute(0, 2, 3, 1)
+        out = torch.cat((x, y), 1)
+        out = out.squeeze(-1)
+        for i, down in enumerate(self.downs[:-1]):
+            out = down(out)
+        out = self.pad(out)
+        out = self.downs[-1](out)
+        out = self.pad(out)
+        out = self.conv(out)
+        out = out.unsqueeze(-1)
         return out
 
 
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    gen = Generator(13, 12).to(device)
-    disc = Discriminator(13, 12).to(device)
+    gen = Generator().to(device)
+    disc = Discriminator().to(device)
     
-    x = torch.rand(2, 384, 384, 13).to(device)
-    y = torch.rand(2, 384, 384, 12).to(device)
+    x = torch.rand(2, 13, 384, 384, 1).to(device)
+    y = torch.rand(2, 12, 384, 384, 1).to(device)
     with torch.no_grad():
         y = gen(x)
         print(y)
