@@ -47,8 +47,6 @@ def get_parser():
                         help='Load pretrained checkpoints for test.')
     parser.add_argument('--ckpt_name', default=None, type=str,
                         help='The model checkpoint trained on SEVIR.')
-    parser.add_argument('--edl', action='store_true',
-                        help='Use Evidential Deep Learning on model.')
     return parser
 
 def main():
@@ -75,7 +73,7 @@ def main():
     dm = SEVIRPLModule.get_sevir_datamodule(
         dataset_oc=dataset_oc,
         micro_batch_size=micro_batch_size,
-        num_workers=8,)
+        num_workers=4,)
     dm.prepare_data()
     dm.setup()
     accumulate_grad_batches = total_batch_size // (micro_batch_size * args.gpus)
@@ -92,7 +90,7 @@ def main():
         devices=args.gpus,
         accumulate_grad_batches=accumulate_grad_batches,
     )
-    trainer = Trainer(**trainer_kwargs, detect_anomaly=True)
+    trainer = Trainer(**trainer_kwargs)
     if args.pretrained:
         pretrained_ckpt_name = pytorch_state_dict_name
         if not os.path.exists(os.path.join(pretrained_checkpoints_dir, pretrained_ckpt_name)):

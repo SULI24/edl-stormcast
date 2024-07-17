@@ -11,7 +11,7 @@ dataset:
   sample_mode: "sequent"
   stride: 12
   layout: "NTHWC"
-  start_date: null
+  start_date: [2018, 9, 1]
   train_val_split_date: [2019, 1, 1]
   train_test_split_date: [2019, 6, 1]
   end_date: null
@@ -24,13 +24,13 @@ layout:
   layout: "NTHWC"
 optim:
   total_batch_size: 32
-  micro_batch_size: 2
+  micro_batch_size: 8
   seed: 0
   method: "adamw"
   lr: 0.001
   wd: 0.0
   gradient_clip_val: 1.0
-  max_epochs: 100
+  max_epochs: 30
   # scheduler
   lr_scheduler_mode: "cosine"
   min_lr_ratio: 1.0e-3
@@ -42,7 +42,7 @@ optim:
   early_stop_patience: 20
   save_top_k: 1
 logging:
-  logging_prefix: "EDL (1e-2)"
+  logging_prefix: "Small_Earthformer"
   monitor_lr: true
   monitor_device: false
   # track_grad_norm: -1
@@ -61,7 +61,7 @@ model:
   name: earthformer
   input_shape: [13, 384, 384, 1]
   target_shape: [12, 384, 384, 1]
-  base_units: 128
+  base_units: 64
   # block_units: null
   scale_alpha: 1.0
 
@@ -109,7 +109,7 @@ model:
   initial_downsample_type: "stack_conv"
   initial_downsample_activation: "leaky"
   initial_downsample_stack_conv_num_layers: 3
-  initial_downsample_stack_conv_dim_list: [16, 64, 128]
+  initial_downsample_stack_conv_dim_list: [4, 16, 64]
   initial_downsample_stack_conv_downscale_list: [3, 2, 2]
   initial_downsample_stack_conv_num_conv_list: [2, 2, 2]
 
@@ -119,11 +119,11 @@ model:
   down_up_linear_init_mode: "0"
   norm_init_mode: "0"
 loss:
-  loss_fn: 'nll'
-  edl: True
+  loss_fn: 'mse'
+  edl: False
   edl_act: 'softplus'
-  lambda: 1e-2
+  lambda: 1e-1
   lambda_increasing: True
-  slope: 1e-3
+  slope: 1e-2
   kl: False
   omega: 0.01

@@ -38,9 +38,6 @@ exps_dir = os.path.join(_curr_dir, "experiments")
 # pretrained_checkpoints_dir = cfg.pretrained_checkpoints_dir
 # pytorch_state_dict_name = "earthformer_sevir.pt"
 
-torch.autograd.set_detect_anomaly(True)
-
-
 def KL_NIG(mu1, v1, a1, b1, mu2, v2, a2, b2):
     KL = 0.5*(a1-1)/b1 * (v2*torch.square(mu2-mu1))  \
         + 0.5*v2/v1  \
@@ -56,7 +53,7 @@ def KLDiv(out_seq, gamma, v, alpha, beta, omega=0.01, kl=False):
     error = (out_seq - gamma).abs()
     
     if kl:
-        loss = KL_NIG(gamma, vv, alpha, beta, gamma, omega, 1+omega, beta)
+        loss = KL_NIG(gamma, v, alpha, beta, gamma, omega, 1+omega, beta)
     else:
         loss = 2*v+alpha
     
@@ -72,6 +69,98 @@ def KLL_NIG(y, output):
     t5 = (alpha + 0.5).lgamma()
     nll = t1 - t2 + t3 + t4 - t5
     return nll.mean()
+
+
+def modified_mse(gamma, nu, alpha, beta, target, reduction='mean'):
+    """
+    Lipschitz MSE loss of the "Improving evidential deep learning via multi-task learning."
+
+    Args:
+        gamma ([FloatTensor]): the output of the ENet.
+        nu ([FloatTensor]): the output of the ENet.
+        alpha ([FloatTensor]): the output of the ENet.
+        beta ([FloatTensor]): the output of the ENet.
+        target ([FloatTensor]): true labels.
+        reduction (str, optional): . Defaults to 'mean'.
+
+    Returns:
+        [FloatTensor]: The loss value. 
+    """
+    mse = (gamma-target)**2
+    c = get_mse_coef(gamma, nu, alpha, beta, target).detach()
+    modified_mse = mse*c
+    if reduction == 'mean': 
+        return modified_mse.mean()
+    elif reduction == 'sum':
+        return modified_mse.sum()
+    else:
+        return modified_mse
+
+
+def get_mse_coef(gamma, nu, alpha, beta, y):
+    """
+    Return the coefficient of the MSE loss for each prediction.
+    By assigning the coefficient to each MSE value, it clips the gradient of the MSE
+    based on the threshold values U_nu, U_alpha, which are calculated by check_mse_efficiency_* functions.
+
+    Args:
+        gamma ([FloatTensor]): the output of the ENet.
+        nu ([FloatTensor]): the output of the ENet.
+        alpha ([FloatTensor]): the output of the ENet.
+        beta ([FloatTensor]): the output of the ENet.
+        y ([FloatTensor]): true labels.
+
+    Returns:
+        [FloatTensor]: [0.0-1.0], the coefficient of the MSE for each prediction.
+    """
+    alpha_eff = check_mse_efficiency_alpha(gamma, nu, alpha, beta, y)
+    nu_eff = check_mse_efficiency_nu(gamma, nu, alpha, beta, y)
+    delta = (gamma - y).abs()
+    min_bound = torch.min(nu_eff, alpha_eff).min()
+    c = (min_bound.sqrt()/delta).detach()
+    return torch.clip(c, min=False, max=1.)
+
+
+def check_mse_efficiency_alpha(gamma, nu, alpha, beta, y, reduction='mean'):
+    """
+    Check the MSE loss (gamma - y)^2 can make negative gradients for alpha, which is
+    a pseudo observation of the normal-inverse-gamma. We can use this to check the MSE
+    loss can success(increase the pseudo observation, alpha).
+    
+    Args:
+        gamma, nu, alpha, beta(torch.Tensor) output values of the evidential network
+        y(torch.Tensor) the ground truth
+    
+    Return:
+        partial f / partial alpha(numpy.array) 
+        where f => the NLL loss (BayesianDTI.loss.MarginalLikelihood)
+    
+    """
+    delta = (y-gamma)**2
+    right = (torch.exp((torch.digamma(alpha+0.5)-torch.digamma(alpha))) - 1)*2*beta*(1+nu) / nu
+
+    return (right).detach()
+
+
+def check_mse_efficiency_nu(gamma, nu, alpha, beta, y):
+    """
+    Check the MSE loss (gamma - y)^2 can make negative gradients for nu, which is
+    a pseudo observation of the normal-inverse-gamma. We can use this to check the MSE
+    loss can success(increase the pseudo observation, nu).
+    
+    Args:
+        gamma, nu, alpha, beta(torch.Tensor) output values of the evidential network
+        y(torch.Tensor) the ground truth
+    
+    Return:
+        partial f / partial nu(torch.Tensor) 
+        where f => the NLL loss (BayesianDTI.loss.MarginalLikelihood)
+    """
+    gamma, nu, alpha, beta = gamma.detach(), nu.detach(), alpha.detach(), beta.detach()
+    nu_1 = (nu+1)/nu
+    return (beta*nu_1/alpha)
+
+
 
 
 class AverageLoss(Metric):
@@ -119,15 +208,50 @@ class SEVIRPLModule(pl.LightningModule):
             
         #loss fn
         self.loss_cfg = OmegaConf.to_object(oc.loss)
-        if self.loss_cfg["loss_fn"] == 'mse':
+        self.edl = self.loss_cfg["edl"]
+        if self.loss_cfg["loss_fn"] == 'mse' and not self.edl:
             self.loss_fn = F.mse_loss
+        elif self.loss_cfg["loss_fn"] == 'mse' and self.edl:
+            self.loss_fn = self.MSE_EDL
+        elif self.loss_cfg["loss_fn"] == 'mse_to_nll':
+            self.loss_fn = self.MSE_to_NLL
+        elif self.loss_cfg["loss_fn"] == 'mse_plus_nll':
+            self.loss_fn = self.MSE_plus_NLL
         elif self.loss_cfg["loss_fn"] == 'nll':
             self.loss_fn = KLL_NIG
-        self.edl = self.loss_cfg["edl"]
+        elif self.loss_cfg["loss_fn"] == 'lipschitz':
+            self.loss_fn = self.lipschitz
+        elif self.loss_cfg["loss_fn"] == 'custom_nll':
+            self.loss_fn = self.custom_nll
+            # Initialize all running statistics at 0.
+            self.num_losses = 5
+            self.running_mean_L = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_mean_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_S_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_std_l = None        
+        elif self.loss_cfg["loss_fn"] == 'custom_nll_v2':
+            self.loss_fn = self.custom_nll
+            # Initialize all running statistics at 0.
+            self.num_losses = 6
+            self.running_mean_L = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_mean_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_S_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_std_l = None
+        elif self.loss_cfg["loss_fn"] == 'custom_nll_v3':
+            self.loss_fn = self.custom_nll
+            # Initialize all running statistics at 0.
+            self.num_losses = 2
+            self.running_mean_L = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_mean_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_S_l = torch.zeros((self.num_losses,), requires_grad=False).type(torch.FloatTensor)
+            self.running_std_l = None
+        
         self.edl_act = self.loss_cfg["edl_act"]
         self.kldiv = KLDiv
         self.lambda_increasing = self.loss_cfg["lambda_increasing"]
         self.coeff = lambda x: self.loss_cfg["slope"] * x if self.loss_cfg["slope"] * x < self.loss_cfg["lambda"] else self.loss_cfg["lambda"]
+        if self.loss_cfg["late_start"] != 0:
+            self.coeff = lambda x: 0 if x < self.loss_cfg["late_start"] else (self.loss_cfg["slope"] * (x - self.loss_cfg["late_start"]) if self.loss_cfg["slope"] * (x - self.loss_cfg["late_start"]) < self.loss_cfg["lambda"] else self.loss_cfg["lambda"])
         
         if model_cfg["name"] == "earthformer":
             self.torch_nn_module = CuboidTransformerModel(
@@ -261,6 +385,97 @@ class SEVIRPLModule(pl.LightningModule):
             threshold_list=self.threshold_list,
             metrics_list=self.metrics_list,
             eps=1e-4,)
+        
+        
+    def MSE_EDL(self, y, output):
+        gamma, v, alpha, beta = torch.split(output, 1, -1)
+
+        return F.mse_loss(y, gamma)
+    
+    def MSE_to_NLL(self, y, output):
+        gamma, v, alpha, beta = torch.split(output, 1, -1)
+        
+        if self.current_epoch < self.loss_cfg["late_start"]:
+            return F.mse_loss(y, gamma)
+        else:
+            return KLL_NIG(y, output)
+        
+    def MSE_plus_NLL(self, y, output):
+        gamma, v, alpha, beta = torch.split(output, 1, -1)
+        
+        return F.mse_loss(y, gamma) + KLL_NIG(y, output) * .001
+    
+    def lipschitz(self, y, output):
+        gamma, v, alpha, beta = torch.split(output, 1, -1)
+        
+        return modified_mse(gamma, v, alpha, beta, y) + KLL_NIG(y, output)
+    
+    def custom_nll(self, y, output):
+        gamma, v, alpha, beta = torch.split(output, 1, -1)
+        two_beta_lambda = 2 * beta * (1 + v)
+        t1 = 0.5 * (torch.pi / v).log()
+        t2 = alpha * two_beta_lambda.log()
+        t3 = (alpha + 0.5) * (v * (y - gamma) ** 2 + two_beta_lambda).log()
+        t4 = alpha.lgamma()
+        t5 = (alpha + 0.5).lgamma()
+        if self.loss_cfg["loss_fn"] == "custom_nll":
+            unweighted_losses = [t1.mean(), -t2.mean(), t3.mean(), t4.mean(), -t5.mean()]
+        elif self.loss_cfg["loss_fn"] == "custom_nll_v2":
+            unweighted_losses = [t1.mean(), -t2.mean(), t3.mean(), t4.mean(), -t5.mean(), F.mse_loss(y, gamma)]
+        elif self.loss_cfg["loss_fn"] == "custom_nll_v3":
+            nll = t1 - t2 + t3 + t4 - t5
+            unweighted_losses = [nll.mean(), F.mse_loss(y, gamma)]
+        
+        L = torch.tensor(unweighted_losses, requires_grad=False).to(self.device)
+        if self.training:
+            return torch.sum(L)
+        
+        self.running_mean_L = self.running_mean_L.to(self.device)
+        self.running_mean_l = self.running_mean_l.to(self.device)
+        self.running_S_l = self.running_S_l.to(self.device)
+        if self.running_std_l is not None:
+            self.running_std_l = self.running_std_l.to(self.device)
+        
+        # If we are at the zero-th iteration, set L0 to L. Else use the running mean.
+        L0 = L.clone() if self.global_step == 0 else self.running_mean_L
+        # Compute the loss ratios for the current iteration given the current loss L.
+        l = L / L0
+
+        # If we are in the first iteration set alphas to all 1/32
+        if self.global_step <= 1:
+            self.alphas = torch.ones((self.num_losses,), requires_grad=False).type(torch.FloatTensor).to(
+                self.device) / self.num_losses
+        # Else, apply the loss weighting method.
+        else:
+            ls = self.running_std_l / self.running_mean_l
+            self.alphas = ls / torch.sum(ls)
+
+        # Apply Welford's algorithm to keep running means, variances of L,l. But only do this throughout
+        # training the model.
+        # 1. Compute the decay parameter the computing the mean.
+        if self.global_step == 0:
+            mean_param = 0.0
+        else:
+            mean_param = (1. - 1 / (self.global_step + 1))
+
+        # 2. Update the statistics for l
+        x_l = l.clone().detach()
+        new_mean_l = mean_param * self.running_mean_l + (1 - mean_param) * x_l
+        self.running_S_l += (x_l - self.running_mean_l) * (x_l - new_mean_l)
+        self.running_mean_l = new_mean_l
+
+        # The variance is S / (t - 1), but we have global_step = t - 1
+        running_variance_l = self.running_S_l / (self.global_step + 1)
+        self.running_std_l = torch.sqrt(running_variance_l + 1e-8)
+
+        # 3. Update the statistics for L
+        x_L = L.clone().detach()
+        self.running_mean_L = mean_param * self.running_mean_L + (1 - mean_param) * x_L
+
+        # Get the weighted losses and perform a standard back-pass.
+        weighted_losses = [self.alphas[i] * unweighted_losses[i] for i in range(len(unweighted_losses))]
+        loss = sum(weighted_losses)
+        return loss 
 
     def configure_save(self, cfg_file_path=None):
         self.save_dir = os.path.join(exps_dir, self.save_dir)
@@ -541,6 +756,7 @@ class SEVIRPLModule(pl.LightningModule):
             accelerator="gpu",
             # Distributed data parallel
             strategy="ddp_find_unused_parameters_true",
+            # strategy="auto",
             # optimization
             max_epochs=self.oc.optim.max_epochs,
             check_val_every_n_epoch=self.oc.trainer.check_val_every_n_epoch,
@@ -624,7 +840,7 @@ class SEVIRPLModule(pl.LightningModule):
             gamma = output
         loss = self.loss_fn(out_seq, output)
         if self.edl:
-            kldiv = self.kldiv(out_seq, gamma, v, alpha, beta, omega=self.loss_cfg["omega"], kl=self.loss_cfg["kl"])
+            kldiv = self.kldiv(out_seq, gamma, v, alpha, beta, omega=torch.tensor(self.loss_cfg["omega"], requires_grad=False), kl=self.loss_cfg["kl"])
         else:
             kldiv = 0
         return gamma, loss, kldiv, edl_params
@@ -793,7 +1009,7 @@ class SEVIRPLModule(pl.LightningModule):
         self.log('test_frame_mae_epoch', test_mae,
                  prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         
-        self.log('test_loss_mse/nll_epoch', test_loss,
+        self.log('test_loss_mse-nll_epoch', test_loss,
                  prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
         self.log('test_kldiv_epoch', test_kldiv,
                  prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
@@ -852,7 +1068,8 @@ class SEVIRPLModule(pl.LightningModule):
             target_seq: torch.Tensor,
             pred_seq: torch.Tensor,
             edl_params: torch.Tensor,
-            mode: str = "train"):
+            mode: str = "train",
+            vis_hits_misses_fas: bool = True):
         r"""
         Parameters
         ----------
@@ -883,4 +1100,5 @@ class SEVIRPLModule(pl.LightningModule):
                     label=self.oc.logging.logging_prefix,
                     interval_real_time=self.oc.dataset.interval_real_time,
                     edl=self.edl,
-                    edl_params=edl_params)
+                    edl_params=edl_params,
+                    vis_hits_misses_fas=vis_hits_misses_fas)

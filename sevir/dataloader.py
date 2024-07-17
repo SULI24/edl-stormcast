@@ -258,6 +258,12 @@ class SEVIRDataLoader:
         hdf_filenames = []
         for t in imgt:
             hdf_filenames += list(np.unique( self._samples[f'{t}_filename'].values ))
+        
+        if "storm" in self.sevir_data_dir:
+            hdf_filenames = [f for f in hdf_filenames if "STORM" in f]
+        if "random" in self.sevir_data_dir:
+            hdf_filenames = [f for f in hdf_filenames if "RANDOM" in f]
+        
         self._hdf_files = {}
         for f in hdf_filenames:
             if verbose:
