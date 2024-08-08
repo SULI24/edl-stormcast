@@ -209,6 +209,7 @@ class SEVIRPLModule(pl.LightningModule):
         #loss fn
         self.loss_cfg = OmegaConf.to_object(oc.loss)
         self.edl = self.loss_cfg["edl"]
+        
         if self.loss_cfg["loss_fn"] == 'mse' and not self.edl:
             self.loss_fn = F.mse_loss
         elif self.loss_cfg["loss_fn"] == 'mse' and self.edl:
@@ -403,7 +404,7 @@ class SEVIRPLModule(pl.LightningModule):
     def MSE_plus_NLL(self, y, output):
         gamma, v, alpha, beta = torch.split(output, 1, -1)
         
-        return F.mse_loss(y, gamma) + KLL_NIG(y, output) * .001
+        return F.mse_loss(y, gamma) + KLL_NIG(y, output)
     
     def lipschitz(self, y, output):
         gamma, v, alpha, beta = torch.split(output, 1, -1)

@@ -2870,6 +2870,7 @@ class CuboidTransformerModel(nn.Module):
                  norm_init_mode="0",
                  edl = False,
                  edl_act = 'relu',
+                 dropout = False,
                  ):
         """
 

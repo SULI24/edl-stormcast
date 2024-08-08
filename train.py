@@ -47,6 +47,8 @@ def get_parser():
                         help='Load pretrained checkpoints for test.')
     parser.add_argument('--ckpt_name', default=None, type=str,
                         help='The model checkpoint trained on SEVIR.')
+    parser.add_argument('--pretrain_baseline', action='store_true',
+                        help='Train on model baseline without EDL.')
     return parser
 
 def main():
@@ -91,6 +93,21 @@ def main():
         accumulate_grad_batches=accumulate_grad_batches,
     )
     trainer = Trainer(**trainer_kwargs)
+    
+    if args.pretrain_baseline:
+        if "mearthformer" in args.save:
+            state_dict = torch.load("models/experiments/mearthformer_drop_0/checkpoints/_sevir.pt", map_location=torch.device("cpu"))
+        else:
+            state_dict = torch.load("models/experiments/earthformer_drop_0/checkpoints/_sevir.pt", map_location=torch.device("cpu"))
+        
+        model_state_dict = pl_module.torch_nn_module.state_dict()
+        
+        # Modify the checkpoint to match the current model's expected dimensions
+        state_dict['dec_final_proj.weight'] = torch.cat([state_dict['dec_final_proj.weight']] + [model_state_dict['dec_final_proj.weight'][1:]], dim=0)
+        state_dict['dec_final_proj.bias'] = torch.cat([state_dict['dec_final_proj.bias']] + [model_state_dict['dec_final_proj.bias'][1:]], dim=0)
+
+        pl_module.torch_nn_module.load_state_dict(state_dict=state_dict)
+        
     if args.pretrained:
         pretrained_ckpt_name = pytorch_state_dict_name
         if not os.path.exists(os.path.join(pretrained_checkpoints_dir, pretrained_ckpt_name)):
