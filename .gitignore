@@ -1,7 +1,6 @@
 models/experiments/
 wandb/
 tmp_config/
-notebooks/figures/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
