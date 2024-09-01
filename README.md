@@ -4,6 +4,11 @@ By Ayush Khot, Xihaier Luo, Ai Kagawa, and Shinjae Yoo
 
 This repo is the official implementation of "Evidential deep learning for probabilistic modelling of extreme storm events"
 
+## Tutorials
+
+- [EDL and Bayesian Comparison Tutorial on SEVIR](./notebooks/ComparativePlotter.ipynb). [![Open In Studio Lab](https://studiolab.sagemaker.aws/studiolab.svg)](https://studiolab.sagemaker.aws/import/github/SULI24/edl-stormcast/blob/main/notebooks/ComparativePlotter.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SULI24/edl-stormcast/blob/main/notebooks/ComparativePlotter.ipynb)
+- [EDL Visualization Tutorial on SEVIR](./notebooks/ComparativePlotter.ipynb). [![Open In Studio Lab](https://studiolab.sagemaker.aws/studiolab.svg)](https://studiolab.sagemaker.aws/import/github/SULI24/edl-stormcast/blob/main/notebooks/EDL-Evaluation.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SULI24/edl-stormcast/blob/main/notebooks/EDL-Evaluation.ipynb)
+
 ## Introduction
 
 Uncertainty quantification (UQ) methods play an important role in reducing errors in weather forecasting. Conventional approaches in UQ for weather forecasting rely on generating an ensemble of forecasts from physics-based simulations to estimate the uncertainty. However, it is computationally expensive to generate many forecasts to predict real-time extreme weather events. Evidential Deep Learning (EDL) is an uncertainty-aware deep learning approach designed to provide confidence about its predictions using only one forecast. It treats learning as an evidence acquisition process where more evidence is interpreted as increased predictive confidence. Using this method, we compare current Bayesian methods with EDL and perform storm forecasting using the Storm EVent ImageRy (SEVIR) dataset. We apply EDL to storm forecasting using real-world weather datasets and compare its performance with traditional methods. Our findings indicate that EDL not only reduces computational overhead but also enhances predictive uncertainty. This method opens up novel opportunities in research areas such as climate risk assessment, where quantifying the uncertainty about future climate is crucial.
@@ -31,9 +36,8 @@ Lastly, install dependencies. SciencePlots requires Latex on your machine, instr
 python3 -m pip install torch==1.12.1+cu116 torchvision==0.13.1+cu116 -f https://download.pytorch.org/whl/torch_stable.html
 python3 -m pip install pytorch_lightning==1.6.4
 python3 -m pip install xarray netcdf4 opencv-python earthnet==0.3.9
-python3 -m pip install omegaconf, matplotlib, SciencePlots
-python3 -m pip install torchinfo, h5py, thop
-cd ROOT_DIR/edl-stormcast
+python3 -m pip install omegaconf matplotlib SciencePlots
+python3 -m pip install torchinfo h5py thop
 ```
 
 ## Dataset
@@ -43,10 +47,23 @@ We adopt NEXRAD Vertically Integrated Liquid (VIL) mosaics in SEVIR for benchmar
 The resolution is thus $13\times 384\times 384\rightarrow 12\times 384\times 384$.
 
 To download SEVIR dataset from AWS S3, run:
+
 ```bash
 cd ROOT_DIR/edl-stormcast
-python ./scripts/datasets/sevir/download_sevir.py --dataset sevir
+aws s3 cp --no-sign-request s3://sevir/CATALOG.csv ./dataset/CATALOG.csv
+aws s3 cp --no-sign-request --recursive s3://sevir/data/vil ./dataset/data/vil
 ```
 
 A visualization example of SEVIR VIL sequence:
-![Example_SEVIR_VIL_sequence](./figures/data/sevir/sevir_example.png)
+![Example_SEVIR_VIL_sequence](./notebooks/figures/sevir_example.png)
+
+## Training
+
+To run the EDL models on the SEVIR dataset, run:
+
+```bash
+cd ROOT_DIR/edl-stormcast
+python train.py --cfg config/cfg_earthformer_edl_1_drop_0.yaml --save earthformer_edl_1_drop_0
+```
+
+## Cite
