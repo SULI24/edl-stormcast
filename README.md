@@ -1,6 +1,12 @@
 ## Evidential Storm Forecasting
 
+By Ayush Khot, Xihaier Luo, Ai Kagawa, and Shinjae Yoo
+
+This repo is the official implementation of "Evidential deep learning for probabilistic modelling of extreme storm events"
+
 ## Introduction
+
+Uncertainty quantification (UQ) methods play an important role in reducing errors in weather forecasting. Conventional approaches in UQ for weather forecasting rely on generating an ensemble of forecasts from physics-based simulations to estimate the uncertainty. However, it is computationally expensive to generate many forecasts to predict real-time extreme weather events. Evidential Deep Learning (EDL) is an uncertainty-aware deep learning approach designed to provide confidence about its predictions using only one forecast. It treats learning as an evidence acquisition process where more evidence is interpreted as increased predictive confidence. Using this method, we compare current Bayesian methods with EDL and perform storm forecasting using the Storm EVent ImageRy (SEVIR) dataset. We apply EDL to storm forecasting using real-world weather datasets and compare its performance with traditional methods. Our findings indicate that EDL not only reduces computational overhead but also enhances predictive uncertainty. This method opens up novel opportunities in research areas such as climate risk assessment, where quantifying the uncertainty about future climate is crucial.
 
 ## Installation
 
@@ -31,3 +37,16 @@ cd ROOT_DIR/edl-stormcast
 ```
 
 ## Dataset
+
+[Storm EVent ImageRy (SEVIR) dataset](https://sevir.mit.edu/) is a spatiotemporally aligned dataset containing over 10,000 weather events.
+We adopt NEXRAD Vertically Integrated Liquid (VIL) mosaics in SEVIR for benchmarking precipitation nowcasting, i.e., to predict the future VIL up to 60 minutes given 65 minutes context VIL. 
+The resolution is thus $13\times 384\times 384\rightarrow 12\times 384\times 384$.
+
+To download SEVIR dataset from AWS S3, run:
+```bash
+cd ROOT_DIR/edl-stormcast
+python ./scripts/datasets/sevir/download_sevir.py --dataset sevir
+```
+
+A visualization example of SEVIR VIL sequence:
+![Example_SEVIR_VIL_sequence](./figures/data/sevir/sevir_example.png)
