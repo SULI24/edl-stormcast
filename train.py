@@ -38,17 +38,21 @@ pytorch_state_dict_name = "_sevir.pt"
 
 def get_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', choices=['unet', 'earthformer'], default='unet', type=str)
-    parser.add_argument('--save', default='tmp_sevir', type=str)
-    parser.add_argument('--gpus', default=1, type=int)
-    parser.add_argument('--cfg', default=None, type=str)
-    parser.add_argument('--test', action='store_true')
+    parser.add_argument('--model', choices=['unet', 'earthformer'], default='earthformer', type=str, 
+                        help="Choose between model type of UNet and Earthformer")
+    parser.add_argument('--save', default='tmp_sevir', type=str, 
+                        help="Name of folder to save results in edl-stormcast/models/experiments/")
+    parser.add_argument('--gpus', default=1, type=int,help="Number of GPUs")
+    parser.add_argument('--cfg', default=None, type=str, 
+                        help="Load settings form file in yaml format")
+    parser.add_argument('--test', action='store_true', 
+                        help="Set this flag when only testing the model")
     parser.add_argument('--pretrained', action='store_true',
                         help='Load pretrained checkpoints for test.')
     parser.add_argument('--ckpt_name', default=None, type=str,
                         help='The model checkpoint trained on SEVIR.')
     parser.add_argument('--pretrain_baseline', action='store_true',
-                        help='Train on model baseline without EDL.')
+                        help='Use pretrained model baseline without EDL as starting checkpoint.')
     return parser
 
 def main():
