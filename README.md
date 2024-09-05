@@ -1,6 +1,6 @@
 ## Evidential Storm Forecasting
 
-By Ayush Khot, Xihaier Luo, Ai Kagawa, and Shinjae Yoo
+By [Ayush Khot](https://scholar.google.com/citations?view_op=list_works&hl=en&user=J78JjZ4AAAAJ), [Xihaier Luo](https://xihaier.github.io/), [Ai Kagawa](https://www.bnl.gov/staff/kagawa), and [Shinjae Yoo](https://www.cs.cmu.edu/~sjyoo/)
 
 This repo is the official implementation of "Evidential deep learning for probabilistic modelling of extreme storm events"
 
@@ -12,6 +12,9 @@ This repo is the official implementation of "Evidential deep learning for probab
 ## Introduction
 
 Uncertainty quantification (UQ) methods play an important role in reducing errors in weather forecasting. Conventional approaches in UQ for weather forecasting rely on generating an ensemble of forecasts from physics-based simulations to estimate the uncertainty. However, it is computationally expensive to generate many forecasts to predict real-time extreme weather events. Evidential Deep Learning (EDL) is an uncertainty-aware deep learning approach designed to provide confidence about its predictions using only one forecast. It treats learning as an evidence acquisition process where more evidence is interpreted as increased predictive confidence. Using this method, we compare current Bayesian methods with EDL and perform storm forecasting using the Storm EVent ImageRy (SEVIR) dataset. We apply EDL to storm forecasting using real-world weather datasets and compare its performance with traditional methods. Our findings indicate that EDL not only reduces computational overhead but also enhances predictive uncertainty. This method opens up novel opportunities in research areas such as climate risk assessment, where quantifying the uncertainty about future climate is crucial.
+
+A visualization example of the EDL uncertainty and prediction is below:
+![EDL Uncertainty](./notebooks/figures/uncertainty.png)
 
 ## Installation
 
@@ -40,6 +43,8 @@ python3 -m pip install omegaconf matplotlib SciencePlots
 python3 -m pip install torchinfo h5py thop
 ```
 
+You may need to do `python3 -m pip install lightning-fabric` at the end if you still get errors with `train.py`.
+
 ## Dataset
 
 [Storm EVent ImageRy (SEVIR) dataset](https://sevir.mit.edu/) is a spatiotemporally aligned dataset containing over 10,000 weather events.
@@ -55,11 +60,35 @@ aws s3 cp --no-sign-request --recursive s3://sevir/data/vil ./dataset/data/vil
 ```
 
 A visualization example of SEVIR VIL sequence:
-![Example_SEVIR_VIL_sequence](./notebooks/figures/sevir_example.png)
+![Example_SEVIR_VIL_sequence](./notebooks/figures/sevir.png)
 
 ## Training
 
-To run the EDL models on the SEVIR dataset, run:
+To train the models, run the following command:
+
+
+```bash
+python train.py <options>
+```
+
+The available options are:
+
+```
+
+  -h, --help            show this help message and exit
+  --model {unet,earthformer}
+                        Choose between model type of UNet and Earthformer
+  --save SAVE           Name of folder to save results in edl-stormcast/models/experiments/
+  --gpus GPUS           Number of GPUs
+  --cfg CFG             Load settings form file in yaml format
+  --test                Set this flag when only testing the model
+  --pretrained          Load pretrained checkpoints for test.
+  --ckpt_name CKPT_NAME
+                        The model checkpoint trained on SEVIR.
+  --pretrain_baseline   Use pretrained model baseline without EDL as starting checkpoint
+```
+
+An example of running EDL models on the SEVIR dataset, looks like:
 
 ```bash
 cd ROOT_DIR/edl-stormcast
