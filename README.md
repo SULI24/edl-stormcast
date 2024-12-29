@@ -96,3 +96,12 @@ python train.py --cfg config/cfg_earthformer_edl_1_drop_0.yaml --save earthforme
 ```
 
 ## Cite
+
+```
+@article{khot2024, 
+    author = {Ayush Khot, Xihaier Luo, Ai Kagawa, Shinjae Yoo}, 
+    title = {Evidential Deep Learning for Probabilistic Modelling of Extreme Storm Events},
+    journal = {Accepted to the Machine Learning for the Physical Sciences workshop at Neurips 2024}, 
+    year = {2024}
+}
+```
