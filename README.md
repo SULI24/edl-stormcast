@@ -2,7 +2,9 @@
 
 By [Ayush Khot](https://scholar.google.com/citations?view_op=list_works&hl=en&user=J78JjZ4AAAAJ), [Xihaier Luo](https://xihaier.github.io/), [Ai Kagawa](https://www.bnl.gov/staff/kagawa), and [Shinjae Yoo](https://www.cs.cmu.edu/~sjyoo/)
 
-This repo is the official implementation of "Evidential deep learning for probabilistic modelling of extreme storm events" that will appear in the Machine Learning and the Physical Sciences workshop at NeurIPS 2024.
+This repo is the official implementation of ["Evidential deep learning for probabilistic modelling of extreme storm events"](https://arxiv.org/abs/2412.14048) that will appear in the Machine Learning and the Physical Sciences workshop at NeurIPS 2024.
+
+Check our [poster](https://neurips.cc/media/PosterPDFs/NeurIPS%202024/100132.png).
 
 ## Tutorials
 
